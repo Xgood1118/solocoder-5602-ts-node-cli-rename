@@ -1,17 +1,1 @@
-文件重命名工具基础功能都很稳——纯替换、正则、编号、日期、大小写、扩展名、插入删除、CSV 映射，加递归扫描、排除目录、冲突检测、撤销回滚，这些全部通过测试。但第一轮深挖挖出几个必须要修的隐患。
-
-第一个是 ReDoS 漏洞。用户传 --regex "(a+)+b" 到一个文件名是 "aaa...a"（没有 b 结尾）的目录，正则引擎会灾难性回溯卡死，进程永远不返回，想杀都杀不掉。虽然不是每个正则都会触发，但这属于用户输入可控的 DoS 攻击面。修复方向有几种：给正则加执行超时（比如 5 秒），或者在调 regex.exec 之前检测是否存在嵌套量词容易回溯的模式（如果正则里检测到括号内有相邻的量词可以先 warning 用户），或者直接用 --regex-timeout 参数让用户自己设超时。用 setTimeout + clearTimeout 或者通过 worker_threads 把正则匹配扔到子线程都是可行的。
-
-第二个是 Windows 大小写不敏感的文件系统假冲突。fs.existsSync 没法区分 "HelloWorld.txt" 和 "helloworld.txt"，因为 Windows 下两者指向同一个文件。结果 --case lower 降个大小写都会报"文件名冲突"，加 --force 会变成 "helloworld_1.txt"。修的话，rename.ts 里的 resolveConflict 在做冲突检测前先比较新旧文件是否只有大小写区别，如果是就直接跳过 existsSync 的检查。
-
-第三个是崩溃安全的回滚。目前的 rollback.json 只在所有文件重命名完成后才写入。如果 rename 了一半程序崩溃了（比如用户关机、内存不足、SIGKILL），已经改名的 50 个文件没有留下任何 undo 记录，用户无法恢复。可以考虑两种方案：增量写入（每 rename 一个文件就往 rollback.json 追加一条），或者事务式：先写个 "rollback.pending" 临时文件，完成后 rename 成 rollback.json，启动时检测如果有 pending 文件就提示上次操作没完成。
-
-第四个是跨设备移动。rename 同一个磁盘内很快，但如果源在 C 盘目标在 D 盘，fs.rename 会抛 EXDEV（cross-device link）错误。应该自动 fallback 成 copy + delete 双阶段，或者在出错时给用户一个清晰的提示让用户手动操作。另外 copy + delete 需要带上文件的元数据（createTime、modifyTime 之类的），不然文件的原始时间戳会丢。
-
-第五个是回滚 JSON 校验。--undo 读 rollback.json 的时候直接 JSON.parse 就信了，如果手动改了 rollback.json 的内容，改什么就执行什么。应该加个 schema 校验：oldPath 必须是存在的文件路径、newPath 不能和 oldPath 一样、entries 至少有一条。可以用 zod 或者手写几个验证函数兜住边界。
-
-第六个是 CSV UTF-8 BOM 兼容。Windows 上 Excel 导出的 CSV 经常带 BOM 头（\\xEF\\xBB\\xBF），csv-parse 不会自动去掉它，导致第一个 column 的 key 变成 "\\ufeffold_name" 而不是 "old_name"。csvmap.ts 在读取 CSV 后可以用 .replace(/^\\uFEFF/, '') 把 BOM 去掉。
-
-第七个是 --undo 干跑模式显示问题。如果不加 --apply 只预览 undo，结果也打印 "成功: N 个文件"，让人以为已经回滚了。干跑状态下应该显示 "预览: 将撤销 N 个文件"。
-
-R2 验收标准：传 ReDoS 正则 "(a+)+b" 匹配 "aaaa..." 文件时不会死锁（报告超时或警告）；--case lower 把 HelloWorld.txt 降成 helloworld.txt 不会冲突；rename 中途 Ctrl+C 断掉后至少留了部分回滚数据；跨盘 rename 能自动 copy+delete；改坏 rollback.json 后 undo 报错而不是盲目执行；带 BOM 的 CSV 正常解析。
+有几个问题：1. 正则里写了 (a+)+b 碰到很长不匹配的文件名直接卡死，进程永远不返回。2. Windows 上 HelloWorld.txt 改小写一直报冲突，同一文件改个大小写不应该算冲突。3. rename 到一半程序崩溃了，已经改好的文件没有任何记录能恢复回去。4. 把 C 盘文件改到 D 盘直接抛了个英文错误看不懂，应该自己兜底处理。5. rollback.json 内容我手动改坏了，直接把文件改到了不存在的路径上，缺少校验。6. Excel 导出 CSV 带个 BOM 头过去，第一列的名字前面多了一个乱码字符。7. 预览撤销模式显示"成功"而不是"预览"，我差点以为已经执行了。检查修复一下。
