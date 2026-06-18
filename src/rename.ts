@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { Worker, isMainThread, parentPort } from 'worker_threads';
 import {
   RenameOptions,
   RenameRecord,
@@ -11,23 +12,80 @@ const WINDOWS_INVALID_CHARS = /[\\/:*?"<>|]/g;
 const WINDOWS_MAX_FILENAME_LENGTH = 255;
 const REGEX_TIMEOUT_MS = 1000;
 
-function regexMatchWithTimeout(
-  str: string,
-  regex: RegExp
+if (!isMainThread && parentPort) {
+  parentPort.on('message', async (data: { text: string; pattern: string; flags: string }) => {
+    try {
+      const regex = new RegExp(data.pattern, data.flags);
+      const result = regex.exec(data.text);
+      parentPort!.postMessage({ success: true, result });
+    } catch (err) {
+      parentPort!.postMessage({ success: false, error: (err as Error).message });
+    }
+  });
+}
+
+async function regexMatchWithTimeout(
+  text: string,
+  pattern: string,
+  flags: string
 ): Promise<RegExpExecArray | null> {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      reject(new Error('正则表达式执行超时'));
+    const worker = new Worker(__filename);
+    
+    let timeout: NodeJS.Timeout | null = null;
+    let responded = false;
+
+    const cleanup = (error?: Error) => {
+      if (responded) return;
+      responded = true;
+      
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      
+      try {
+        worker.terminate();
+      } catch {
+        // ignore
+      }
+      
+      if (error) {
+        reject(error);
+      }
+    };
+
+    timeout = setTimeout(() => {
+      cleanup(new Error('正则表达式执行超时，可能存在 ReDoS 攻击风险'));
     }, REGEX_TIMEOUT_MS);
 
-    try {
-      const result = regex.exec(str);
-      clearTimeout(timeout);
-      resolve(result);
-    } catch (err) {
-      clearTimeout(timeout);
-      reject(err);
-    }
+    worker.on('message', (response: { success: boolean; result?: RegExpExecArray | null; error?: string }) => {
+      if (responded) return;
+      responded = true;
+      
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      
+      worker.terminate();
+      
+      if (response.success) {
+        resolve(response.result ?? null);
+      } else {
+        reject(new Error(response.error || '正则表达式执行失败'));
+      }
+    });
+
+    worker.on('error', (err) => {
+      cleanup(err);
+    });
+
+    worker.on('exit', (code) => {
+      if (!responded) {
+        cleanup(new Error(`正则表达式执行进程异常退出，退出码: ${code}`));
+      }
+    });
+
+    worker.postMessage({ text, pattern, flags });
   });
 }
 
@@ -117,9 +175,10 @@ export async function computeNewName(
     case 'regex':
       if (options.regex) {
         try {
-          const re = new RegExp(options.regex.pattern, options.regex.flags || 'g');
-          const result = await regexMatchWithTimeout(basename, re);
+          const flags = options.regex.flags || 'g';
+          const result = await regexMatchWithTimeout(basename, options.regex.pattern, flags);
           if (result !== null) {
+            const re = new RegExp(options.regex.pattern, flags);
             newBasename = basename.replace(re, options.regex.replace);
           }
         } catch (err: any) {
