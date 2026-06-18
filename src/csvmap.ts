@@ -1,6 +1,13 @@
 import * as fs from 'fs';
 import { parse } from 'csv-parse';
 
+function stripBOM(content: string): string {
+  if (content.charCodeAt(0) === 0xFEFF) {
+    return content.slice(1);
+  }
+  return content;
+}
+
 export async function loadCsvMap(
   filePath: string
 ): Promise<Map<string, string>> {
@@ -9,7 +16,9 @@ export async function loadCsvMap(
   }
 
   const map = new Map<string, string>();
-  const content = await fs.promises.readFile(filePath, 'utf-8');
+  let content = await fs.promises.readFile(filePath, 'utf-8');
+  
+  content = stripBOM(content);
 
   return new Promise((resolve, reject) => {
     parse(

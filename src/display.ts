@@ -91,12 +91,15 @@ export function printRollbackResult(result: {
   failed: number;
   skipped: number;
   errors: string[];
-}): void {
+}, dryRun: boolean = false): void {
   console.log('');
-  console.log(chalk.bold('撤销执行摘要:'));
-  console.log(`  ${chalk.green('成功')}: ${result.success}`);
+  console.log(chalk.bold(dryRun ? '撤销预览摘要:' : '撤销执行摘要:'));
+  const successLabel = dryRun ? chalk.blue('预览') : chalk.green('成功');
+  console.log(`  ${successLabel}: ${result.success}`);
   console.log(`  ${chalk.yellow('跳过')}: ${result.skipped}`);
-  console.log(`  ${chalk.red('失败')}: ${result.failed}`);
+  if (!dryRun) {
+    console.log(`  ${chalk.red('失败')}: ${result.failed}`);
+  }
 
   if (result.errors.length > 0) {
     console.log('');

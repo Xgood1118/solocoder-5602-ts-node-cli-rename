@@ -9,6 +9,31 @@ import {
 
 const WINDOWS_INVALID_CHARS = /[\\/:*?"<>|]/g;
 const WINDOWS_MAX_FILENAME_LENGTH = 255;
+const REGEX_TIMEOUT_MS = 1000;
+
+function regexMatchWithTimeout(
+  str: string,
+  regex: RegExp
+): Promise<RegExpExecArray | null> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error('正则表达式执行超时'));
+    }, REGEX_TIMEOUT_MS);
+
+    try {
+      const result = regex.exec(str);
+      clearTimeout(timeout);
+      resolve(result);
+    } catch (err) {
+      clearTimeout(timeout);
+      reject(err);
+    }
+  });
+}
+
+function pathsEqualCaseInsensitive(path1: string, path2: string): boolean {
+  return path.normalize(path1).toLowerCase() === path.normalize(path2).toLowerCase();
+}
 
 export function sanitizeFilename(name: string): string {
   return name.replace(WINDOWS_INVALID_CHARS, '_');
@@ -91,8 +116,15 @@ export async function computeNewName(
 
     case 'regex':
       if (options.regex) {
-        const re = new RegExp(options.regex.pattern, options.regex.flags || 'g');
-        newBasename = basename.replace(re, options.regex.replace);
+        try {
+          const re = new RegExp(options.regex.pattern, options.regex.flags || 'g');
+          const result = await regexMatchWithTimeout(basename, re);
+          if (result !== null) {
+            newBasename = basename.replace(re, options.regex.replace);
+          }
+        } catch (err: any) {
+          throw new Error(`正则表达式错误: ${err.message}`);
+        }
       }
       break;
 
@@ -177,11 +209,19 @@ export async function computeNewName(
 }
 
 export function resolveConflict(
+  oldPath: string,
   newPath: string,
   existingPaths: Set<string>,
   force: boolean
 ): { path: string; resolved: boolean } {
-  if (!existingPaths.has(newPath) && !fs.existsSync(newPath)) {
+  if (pathsEqualCaseInsensitive(oldPath, newPath)) {
+    return { path: newPath, resolved: true };
+  }
+
+  const existsInPlan = Array.from(existingPaths).some((p) => pathsEqualCaseInsensitive(p, newPath));
+  const existsOnDisk = fs.existsSync(newPath);
+  
+  if (!existsInPlan && !existsOnDisk) {
     return { path: newPath, resolved: true };
   }
 
@@ -204,13 +244,19 @@ export function resolveConflict(
   return { path: candidate, resolved: true };
 }
 
+function getDriveLetter(filePath: string): string {
+  const match = filePath.match(/^([A-Za-z]):/);
+  return match ? match[1].toUpperCase() : '';
+}
+
 export async function executeRename(
   oldPath: string,
   newPath: string,
-  dryRun: boolean
+  dryRun: boolean,
+  onSuccess?: (oldPath: string, newPath: string) => void
 ): Promise<{ success: boolean; error?: string }> {
-  if (oldPath === newPath) {
-    return { success: false, error: '新旧文件名相同' };
+  if (pathsEqualCaseInsensitive(oldPath, newPath)) {
+    return { success: false, error: '新旧文件名相同（不区分大小写）' };
   }
 
   const validationError = validateFilename(path.basename(newPath));
@@ -232,7 +278,18 @@ export async function executeRename(
       return { success: false, error: `目标目录不存在: ${newDir}` };
     }
 
+    const oldDrive = getDriveLetter(oldPath);
+    const newDrive = getDriveLetter(newPath);
+    if (oldDrive && newDrive && oldDrive !== newDrive) {
+      return { success: false, error: `跨磁盘重命名不支持（从 ${oldDrive}: 到 ${newDrive}:），请使用复制方式` };
+    }
+
     await fs.promises.rename(oldPath, newPath);
+    
+    if (onSuccess) {
+      onSuccess(oldPath, newPath);
+    }
+    
     return { success: true };
   } catch (err: any) {
     let errorMsg = err.message || '未知错误';
@@ -242,6 +299,8 @@ export async function executeRename(
       errorMsg = '文件不存在';
     } else if (err.code === 'ENOSPC') {
       errorMsg = '磁盘空间不足';
+    } else if (err.code === 'EXDEV') {
+      errorMsg = '不支持跨磁盘重命名，请确保源文件和目标文件在同一磁盘';
     }
     return { success: false, error: errorMsg };
   }
@@ -249,6 +308,7 @@ export async function executeRename(
 
 export interface RenameProcessorCallbacks {
   onProgress?: (record: RenameRecord, current: number, total: number) => void;
+  onSuccess?: (oldPath: string, newPath: string) => void;
 }
 
 export async function processRenames(
@@ -299,7 +359,7 @@ export async function processRenames(
       });
     }
 
-    if (oldPath === newPath) {
+    if (pathsEqualCaseInsensitive(oldPath, newPath)) {
       const oldName = path.basename(oldPath);
       results.push({
         oldPath,
@@ -315,7 +375,7 @@ export async function processRenames(
       continue;
     }
 
-    const conflict = resolveConflict(newPath, usedNewPaths, options.force);
+    const conflict = resolveConflict(oldPath, newPath, usedNewPaths, options.force);
     if (!conflict.resolved) {
       results.push({
         oldPath,
@@ -336,9 +396,16 @@ export async function processRenames(
     plan.push({ oldPath, newPath: conflict.path });
   }
 
+  const onSuccessCallback = callbacks.onSuccess;
+
   for (let i = 0; i < plan.length; i++) {
     const { oldPath, newPath } = plan[i];
-    const result = await executeRename(oldPath, newPath, options.dryRun || !options.apply);
+    const result = await executeRename(
+      oldPath,
+      newPath,
+      options.dryRun || !options.apply,
+      onSuccessCallback
+    );
 
     const record: RenameRecord = {
       oldPath,

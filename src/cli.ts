@@ -8,6 +8,7 @@ import { FileScanner } from './scanner';
 import { processRenames } from './rename';
 import {
   saveRollback,
+  saveRollbackEntry,
   loadRollback,
   executeRollback,
   listRollbackFiles,
@@ -97,12 +98,13 @@ async function main() {
     const data = await loadRollback(rollbackFile);
     printInfo(`将撤销 ${data.entries.length} 个文件的重命名`);
 
-    if (!opts.apply) {
+    const isDryRun = !opts.apply || opts.dryRun;
+    if (isDryRun) {
       printWarning('这是预览模式，未实际执行。加 --apply 确认撤销');
     }
 
-    const result = await executeRollback(data, !opts.apply || opts.dryRun);
-    printRollbackResult(result);
+    const result = await executeRollback(data, isDryRun);
+    printRollbackResult(result, isDryRun);
     return;
   }
 
@@ -252,6 +254,9 @@ async function main() {
     onProgress: (_record, current) => {
       progressBar.update(current);
     },
+    onSuccess: opts.apply && !opts.dryRun ? async (oldPath, newPath) => {
+      await saveRollbackEntry(oldPath, newPath);
+    } : undefined,
   });
 
   progressBar.stop();
@@ -260,11 +265,8 @@ async function main() {
   printSummary(results);
 
   if (opts.apply && !opts.dryRun) {
-    const rollbackPath = await saveRollback(results);
-    if (rollbackPath) {
-      printSuccess(`已保存 rollback 文件: ${rollbackPath}`);
-      printInfo(`使用 --undo ${rollbackPath} 可撤销本次操作`);
-    }
+    printSuccess('所有成功重命名的文件已自动保存到 rollback');
+    printInfo('使用 --undo 可撤销本次操作');
   }
 }
 
