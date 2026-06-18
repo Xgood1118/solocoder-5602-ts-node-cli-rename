@@ -1,0 +1,19 @@
+写一个批量文件重命名命令行工具，技术栈 Node.js + TypeScript。给运营/设计同事处理图片素材改名用，处理一次几百张图那种。
+
+支持的模式：纯替换（find/replace 字符串）、正则替换、通配符（glob，比如 *.png）、编号（前缀/后缀/数字位数 0 填充）、按日期改名（用文件 mtime）、按 EXIF 日期（图片才支持）、大小写转换（lower/upper/title）、插入/删除字符、扩展名批量改。
+
+预览模式 --dry-run 不实际改，只输出将要执行的重命名清单。确认后再加 --apply 才真改。改之前先把当前文件名列表存到一个 rollback 文件，撤销时（--undo）读这个文件逆向操作。
+
+递归子目录用 -r，要能排除 .git、node_modules、.DS_Store 这种系统/项目目录。文件名冲突处理：默认是遇到冲突就跳过+警告，可选 --force 自动加序号后缀解决。
+
+CSV 映射改名：从 CSV 文件读两列（old_name, new_name），按映射关系改。
+
+执行过程中输出表格：原文件名、新文件名、状态（成功/跳过/失败）、失败原因。失败的可能原因：权限不足、文件不存在、目标文件已存在（冲突）、磁盘满、文件名太长（Windows 限制 255）。
+
+特殊字符处理：Windows 文件名不允许 \ / : * ? " < > |，遇到这些字符要转义或者跳过。中文文件名支持。
+
+大文件场景优化：处理上万文件不能全部读到内存里，用流式处理。控制台输出太多会刷屏，加进度条（用 cli-progress 库）。
+
+代码组织：src/cli.ts（参数解析）、src/rename.ts（核心重命名逻辑）、src/scanner.ts（文件扫描）、src/rollback.ts（撤销支持）、src/display.ts（输出表格）、src/csvmap.ts（CSV 映射）、src/types.ts（类型定义）。
+
+依赖：commander（参数）、chalk（颜色）、cli-progress（进度条）、csv-parse（CSV 解析）、glob（文件匹配）。TS 编译用 tsc 跑一下能出 dist/。总依赖控制在 10 个以内。
